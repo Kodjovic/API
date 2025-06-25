@@ -85,17 +85,15 @@ def maj_google_sheet(pharmacies):
     for p in pharmacies:
         tab_gardes.append_row([today, p["Nom_pharmacie"], p["Numero_telephone"], p["Adresse"]])
 
+@app.get("/")
+def home():
+    return {"message": "Bienvenue sur l'API de pharmacies de garde en ligne 🚑"}
+
 @app.get("/pharmacies_de_garde")
 def pharmacies_de_garde():
-    return {"message": "API de pharmacies de garde en ligne 🚀"}
-
     try:
-        pharmacies = scraper_pharmacies()
-        maj_google_sheet(pharmacies)
-        return pharmacies
+        pharmacies = scraper_pharmacies()  # Tu récupères les données
+        maj_google_sheet(pharmacies)       # Tu les envoies à Google Sheets
+        return pharmacies                   # Tu renvoies la réponse à l'utilisateur
     except Exception as e:
-        return {"error": str(e)}
-
-    pharmacies = scraper_pharmacies()
-    maj_google_sheet(pharmacies)
-    return pharmacies
+        return {"error": str(e)} 
