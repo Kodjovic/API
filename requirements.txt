@@ -1,6 +1,4 @@
-fastapi 
+fastapi
 uvicorn
-requests 
-beautifulsoup4 
-gspread
-oauth2client
+requests
+beautifulsoup4
