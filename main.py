@@ -1,4 +1,41 @@
-from fastapi import FastAPI, BackgroundTasks
+@app.delete("/cache")
+def clear_cache():
+    """Vide le cache"""
+    CACHE["data"] = []
+    CACHE["last_update"] = None
+    CACHE["is_updating"] = False
+    return {"message": "Cache vidé avec succès"}
+
+# Données de fallback en cas d'échec total du scraping
+FALLBACK_DATA = [
+    {
+        "Nom_pharmacie": "Pharmacie de l'Étoile",
+        "Numero_telephone": "22 21 27 64",
+        "Adresse": "Rue de l'Indépendance, Lomé"
+    },
+    {
+        "Nom_pharmacie": "Pharmacie du Centre",
+        "Numero_telephone": "22 21 35 42",
+        "Adresse": "Avenue du 24 Janvier, Lomé"
+    },
+    {
+        "Nom_pharmacie": "Pharmacie de la Paix",
+        "Numero_telephone": "22 21 45 67",
+        "Adresse": "Boulevard du 13 Janvier, Lomé"
+    }
+]
+
+@app.get("/fallback_data")
+def get_fallback_data():
+    """Retourne des données de fallback pour tests"""
+    return {
+        "data": FALLBACK_DATA,
+        "metadata": {
+            "source": "fallback",
+            "count": len(FALLBACK_DATA),
+            "note": "Données de test - remplacer par scraping réel"
+        }
+    }from fastapi import FastAPI, BackgroundTasks
 from bs4 import BeautifulSoup
 import requests
 import re
@@ -23,7 +60,7 @@ CACHE = {
 
 # Configuration des requêtes
 REQUEST_CONFIG = {
-    'timeout': aiohttp.ClientTimeout(total=15, connect=5),
+    'timeout': aiohttp.ClientTimeout(total=30, connect=10, sock_read=20),
     'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -31,6 +68,8 @@ REQUEST_CONFIG = {
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
     }
 }
 
@@ -54,58 +93,158 @@ def is_cache_valid() -> bool:
     return elapsed.total_seconds() < (CACHE["cache_duration_minutes"] * 60)
 
 async def scraper_pharmacies_async() -> List[Dict]:
-    """Scraping asynchrone des pharmacies"""
-    url = "https://www.inam.tg/pharmacies-de-garde/"
+    """Scraping asynchrone des pharmacies avec retry et multiples stratégies"""
+    urls_to_try = [
+        "https://www.inam.tg/pharmacies-de-garde/",
+        "http://www.inam.tg/pharmacies-de-garde/",  # Fallback HTTP
+    ]
     
+    # Différents User-Agents à essayer
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0'
+    ]
+    
+    for attempt in range(3):  # 3 tentatives
+        for url in urls_to_try:
+            for user_agent in user_agents:
+                try:
+                    logger.info(f"Tentative {attempt + 1}: {url} avec UA: {user_agent[:50]}...")
+                    
+                    # Configuration spécifique pour cette tentative
+                    timeout = aiohttp.ClientTimeout(
+                        total=45,  # Timeout total augmenté
+                        connect=15,  # Timeout de connexion
+                        sock_read=30  # Timeout de lecture
+                    )
+                    
+                    headers = REQUEST_CONFIG['headers'].copy()
+                    headers['User-Agent'] = user_agent
+                    
+                    # Connector avec SSL désactivé si nécessaire
+                    connector = aiohttp.TCPConnector(
+                        limit=30,
+                        ttl_dns_cache=300,
+                        use_dns_cache=True,
+                        verify_ssl=False  # Désactiver SSL pour les sites avec certificats problématiques
+                    )
+                    
+                    async with aiohttp.ClientSession(
+                        timeout=timeout,
+                        connector=connector,
+                        headers=headers
+                    ) as session:
+                        
+                        # Essayer avec delay progressif
+                        if attempt > 0:
+                            await asyncio.sleep(2 ** attempt)  # 2, 4, 8 secondes
+                        
+                        async with session.get(url, allow_redirects=True) as response:
+                            logger.info(f"Status: {response.status}, Headers: {dict(response.headers)}")
+                            
+                            if response.status == 200:
+                                html_content = await response.text()
+                                logger.info(f"Contenu HTML récupéré ({len(html_content)} caractères)")
+                                
+                                # Vérifier si on a du contenu utile
+                                if len(html_content) > 1000:  # Minimum de contenu attendu
+                                    pharmacies = parse_html_content(html_content)
+                                    if pharmacies:
+                                        logger.info(f"✅ Succès avec {url}: {len(pharmacies)} pharmacies")
+                                        return pharmacies
+                                    else:
+                                        logger.warning(f"HTML récupéré mais aucune pharmacie trouvée")
+                                        # Log d'un échantillon du HTML pour debug
+                                        logger.debug(f"Échantillon HTML: {html_content[:500]}...")
+                                else:
+                                    logger.warning(f"Contenu HTML trop court: {len(html_content)} caractères")
+                            
+                            elif response.status in [403, 406]:
+                                logger.warning(f"Accès refusé ({response.status}), tentative avec autre User-Agent")
+                                continue
+                            else:
+                                logger.warning(f"HTTP {response.status}: {response.reason}")
+                
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout avec {url} (tentative {attempt + 1})")
+                    continue
+                except aiohttp.ClientError as e:
+                    logger.warning(f"Erreur client avec {url}: {e}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Erreur avec {url}: {e}")
+                    continue
+    
+    logger.error("❌ Toutes les tentatives de scraping ont échoué")
+    return []
+
+def parse_html_content(html_content: str) -> List[Dict]:
+    """Parse le contenu HTML et extrait les pharmacies"""
     try:
-        async with aiohttp.ClientSession(timeout=REQUEST_CONFIG['timeout']) as session:
-            logger.info(f"Tentative de scraping: {url}")
-            
-            async with session.get(url, headers=REQUEST_CONFIG['headers']) as response:
-                if response.status != 200:
-                    logger.error(f"Erreur HTTP {response.status}")
-                    return []
-                
-                html_content = await response.text()
-                logger.info(f"Contenu HTML récupéré ({len(html_content)} caractères)")
-                
-        # Parsing avec BeautifulSoup
         soup = BeautifulSoup(html_content, "html.parser")
         
-        # Recherche de table avec plusieurs stratégies
-        table = soup.find('table')
+        # Log de la structure pour debug
+        logger.info(f"Titre de la page: {soup.title.string if soup.title else 'N/A'}")
+        
+        # Multiples stratégies de recherche
+        table = None
+        strategies = [
+            lambda: soup.find('table'),
+            lambda: soup.find('div', class_='pharmacies'),
+            lambda: soup.find('div', id='pharmacies'),
+            lambda: soup.find('div', class_='table-responsive'),
+            lambda: soup.find('tbody'),
+            lambda: soup.select('.pharmacy-list tr'),
+            lambda: soup.select('table tr'),
+        ]
+        
+        for i, strategy in enumerate(strategies):
+            try:
+                result = strategy()
+                if result:
+                    table = result
+                    logger.info(f"✅ Stratégie {i+1} réussie: {table.name}")
+                    break
+            except Exception as e:
+                logger.debug(f"Stratégie {i+1} échouée: {e}")
+                continue
+        
         if not table:
-            # Stratégie alternative - chercher par classe ou ID
-            table = soup.find('div', class_='pharmacies') or soup.find('div', id='pharmacies')
-            if not table:
-                logger.warning("Aucune table trouvée, structure de page peut-être changée")
-                return []
+            logger.error("❌ Aucune table/structure trouvée avec toutes les stratégies")
+            # Log des balises principales pour debug
+            main_tags = [tag.name for tag in soup.find_all()[:20]]
+            logger.debug(f"Principales balises trouvées: {main_tags}")
+            return []
         
         pharmacies = []
         
-        # Traitement des données
-        if table.name == 'table':
-            rows = table.find_all('tr')[1:]  # Skip header
+        # Traitement selon le type d'élément trouvé
+        if table.name == 'table' or table.name == 'tbody':
+            rows = table.find_all('tr')[1:] if table.find_all('tr') else []
         else:
-            rows = table.find_all('div', class_='pharmacy-row') if table else []
+            rows = table.find_all('div', class_='pharmacy-row') if hasattr(table, 'find_all') else []
         
         logger.info(f"Trouvé {len(rows)} lignes à traiter")
         
         for i, row in enumerate(rows):
             try:
-                if table.name == 'table':
+                if row.find_all('td'):
                     cells = row.find_all('td')
                     if len(cells) >= 3:
                         nom = nettoyer_texte(cells[0].get_text())
                         tel = nettoyer_texte(cells[1].get_text())
                         adresse = nettoyer_texte(cells[2].get_text())
+                    else:
+                        continue
                 else:
-                    # Stratégie alternative pour d'autres structures
+                    # Stratégie alternative
                     nom = nettoyer_texte(row.find(class_='nom').get_text() if row.find(class_='nom') else "")
                     tel = nettoyer_texte(row.find(class_='tel').get_text() if row.find(class_='tel') else "")
                     adresse = nettoyer_texte(row.find(class_='adresse').get_text() if row.find(class_='adresse') else "")
                 
-                if nom and adresse:  # Validation minimale
+                if nom and len(nom) > 2:  # Validation plus stricte
                     pharmacies.append({
                         "Nom_pharmacie": nom,
                         "Numero_telephone": tel,
@@ -113,17 +252,14 @@ async def scraper_pharmacies_async() -> List[Dict]:
                     })
                     
             except Exception as e:
-                logger.warning(f"Erreur lors du traitement de la ligne {i}: {e}")
+                logger.warning(f"Erreur ligne {i}: {e}")
                 continue
         
-        logger.info(f"Scraping réussi: {len(pharmacies)} pharmacies trouvées")
+        logger.info(f"✅ Parsing terminé: {len(pharmacies)} pharmacies extraites")
         return pharmacies
         
-    except asyncio.TimeoutError:
-        logger.error("Timeout lors du scraping")
-        return []
     except Exception as e:
-        logger.error(f"Erreur de scraping: {e}")
+        logger.error(f"❌ Erreur lors du parsing HTML: {e}")
         return []
 
 async def update_cache_background():
@@ -303,10 +439,81 @@ async def force_update():
         "last_update": CACHE["last_update"].isoformat() if CACHE["last_update"] else None
     }
 
-@app.delete("/cache")
-def clear_cache():
-    """Vide le cache"""
-    CACHE["data"] = []
-    CACHE["last_update"] = None
-    CACHE["is_updating"] = False
-    return {"message": "Cache vidé avec succès"}
+@app.get("/test_scraping")
+async def test_scraping():
+    """Endpoint de test pour diagnostiquer les problèmes de scraping"""
+    url = "https://www.inam.tg/pharmacies-de-garde/"
+    
+    results = {
+        "url": url,
+        "tests": [],
+        "final_result": None
+    }
+    
+    # Test de connectivité basique
+    try:
+        import socket
+        socket.setdefaulttimeout(10)
+        host = "www.inam.tg"
+        port = 443
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        
+        connectivity_test = {
+            "test": "connectivity",
+            "success": result == 0,
+            "details": f"Connexion TCP vers {host}:{port} {'réussie' if result == 0 else 'échouée'}"
+        }
+        results["tests"].append(connectivity_test)
+        
+    except Exception as e:
+        results["tests"].append({
+            "test": "connectivity",
+            "success": False,
+            "error": str(e)
+        })
+    
+    # Test HTTP basique
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+            connector=aiohttp.TCPConnector(verify_ssl=False)
+        ) as session:
+            async with session.get(url) as response:
+                http_test = {
+                    "test": "http_basic",
+                    "success": response.status == 200,
+                    "status": response.status,
+                    "headers": dict(response.headers),
+                    "content_length": len(await response.text()) if response.status == 200 else 0
+                }
+                results["tests"].append(http_test)
+                
+    except Exception as e:
+        results["tests"].append({
+            "test": "http_basic",
+            "success": False,
+            "error": str(e)
+        })
+    
+    # Test de scraping complet
+    try:
+        pharmacies = await scraper_pharmacies_async()
+        scraping_test = {
+            "test": "full_scraping",
+            "success": len(pharmacies) > 0,
+            "pharmacies_found": len(pharmacies),
+            "sample_data": pharmacies[:2] if pharmacies else None
+        }
+        results["tests"].append(scraping_test)
+        results["final_result"] = pharmacies
+        
+    except Exception as e:
+        results["tests"].append({
+            "test": "full_scraping",
+            "success": False,
+            "error": str(e)
+        })
+    
+    return results
