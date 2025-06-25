@@ -87,6 +87,7 @@ def maj_google_sheet(pharmacies):
 
 @app.get("/pharmacies_de_garde")
 def pharmacies_de_garde():
+    return {"message": "API de pharmacies de garde en ligne 🚀"}
 
     try:
         pharmacies = scraper_pharmacies()
