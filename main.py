@@ -2,244 +2,226 @@
 # -*- coding: utf-8 -*-
 
 """
-API FLASK POUR RENDER - Pharmacies de Garde
-Reçoit les données du script local et notifie WordPress
+API Flask pour Render - Pharmacies de Garde
+Endpoints:
+  POST /save-pharmacies - Reçoit et sauvegarde les données
+  GET /api/pharmacies - Retourne les données sauvegardées
 """
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import json
 import os
-import requests
 from datetime import datetime
+import requests
 
 app = Flask(__name__)
+CORS(app)
 
-# 🔧 Configuration
-JSON_FILE = "pharmacies.json"
-WORDPRESS_WEBHOOK = os.getenv('WORDPRESS_WEBHOOK', 'https://mapharmadegarde.com/wp-json/custom/v1/notify-update')
+# Configuration
+PHARMACIES_FILE = "pharmacies.json"
+WORDPRESS_WEBHOOK_URL = os.environ.get('WORDPRESS_WEBHOOK_URL', 'https://mapharmadegarde.com/wp-json/pharmacies/v1/update')
 
-# ====================
-# ENDPOINTS
-# ====================
+def log_message(message):
+    """Affiche un message avec horodatage"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {message}")
 
-@app.route('/', methods=['GET'])
+def charger_pharmacies():
+    """Charge les pharmacies depuis le fichier JSON"""
+    try:
+        if os.path.exists(PHARMACIES_FILE):
+            with open(PHARMACIES_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                log_message(f"✅ {len(data.get('pharmacies', []))} pharmacies chargées")
+                return data
+        else:
+            log_message("⚠️ Fichier pharmacies.json non trouvé")
+            return {"pharmacies": [], "last_update": None}
+    except Exception as e:
+        log_message(f"❌ Erreur lors du chargement: {e}")
+        return {"pharmacies": [], "last_update": None}
+
+def sauvegarder_pharmacies(pharmacies):
+    """Sauvegarde les pharmacies dans le fichier JSON"""
+    try:
+        data = {
+            "pharmacies": pharmacies,
+            "last_update": datetime.now().isoformat(),
+            "count": len(pharmacies)
+        }
+        
+        with open(PHARMACIES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        log_message(f"💾 {len(pharmacies)} pharmacies sauvegardées")
+        return True
+    except Exception as e:
+        log_message(f"❌ Erreur lors de la sauvegarde: {e}")
+        return False
+
+def notifier_wordpress():
+    """Envoie une notification POST à WordPress"""
+    try:
+        log_message(f"📤 Envoi notification à WordPress: {WORDPRESS_WEBHOOK_URL}")
+        
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Render-Pharmacies-API/1.0"
+        }
+        
+        payload = {
+            "event": "pharmacies_updated",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Nouvelles pharmacies disponibles"
+        }
+        
+        response = requests.post(
+            WORDPRESS_WEBHOOK_URL,
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            log_message("✅ WordPress notifié avec succès")
+            return True
+        else:
+            log_message(f"⚠️ Notification WordPress - Code: {response.status_code}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        log_message("⏰ Timeout lors de la notification WordPress")
+        return False
+    except Exception as e:
+        log_message(f"❌ Erreur notification WordPress: {e}")
+        return False
+
+@app.route('/')
 def home():
     """Page d'accueil de l'API"""
+    data = charger_pharmacies()
     return jsonify({
+        "service": "API Pharmacies de Garde - Render",
         "status": "online",
-        "service": "Pharmacies de Garde API",
-        "version": "1.0",
         "endpoints": {
-            "POST /upload_pharmacies": "Recevoir et sauvegarder les pharmacies",
-            "GET /api/pharmacies": "Récupérer les pharmacies"
+            "save": "POST /save-pharmacies",
+            "get": "GET /api/pharmacies"
+        },
+        "stats": {
+            "pharmacies_count": data.get("count", 0),
+            "last_update": data.get("last_update", "Jamais")
         }
-    }), 200
+    })
 
-
-@app.route('/upload_pharmacies', methods=['POST'])
-def upload_pharmacies():
+@app.route('/save-pharmacies', methods=['POST'])
+def save_pharmacies():
     """
-    Reçoit les pharmacies depuis votre machine locale
-    Sauvegarde dans pharmacies.json
-    Notifie automatiquement WordPress
+    Endpoint POST pour recevoir et sauvegarder les pharmacies
+    Notifie automatiquement WordPress après sauvegarde
     """
     try:
-        # 1. Récupérer les données
-        data = request.get_json()
+        log_message("📥 Réception de nouvelles pharmacies")
         
-        if not data:
+        # Récupérer les données JSON
+        pharmacies = request.get_json()
+        
+        if not pharmacies:
+            log_message("❌ Aucune donnée reçue")
             return jsonify({
                 "success": False,
-                "error": "Aucune donnée reçue"
+                "error": "Aucune donnée fournie"
             }), 400
         
-        if not isinstance(data, list):
+        # Vérifier que c'est une liste
+        if not isinstance(pharmacies, list):
+            log_message("❌ Format invalide (pas une liste)")
             return jsonify({
                 "success": False,
-                "error": "Format invalide. Attendu: liste de pharmacies"
+                "error": "Les données doivent être une liste"
             }), 400
         
-        print(f"📥 Reçu {len(data)} pharmacies")
+        log_message(f"📊 {len(pharmacies)} pharmacies reçues")
         
-        # 2. Ajouter métadonnées
-        pharmacies_data = {
-            "pharmacies": data,
-            "last_update": datetime.now().isoformat(),
-            "count": len(data)
-        }
-        
-        # 3. Sauvegarder dans le fichier JSON
-        try:
-            with open(JSON_FILE, 'w', encoding='utf-8') as f:
-                json.dump(pharmacies_data, f, ensure_ascii=False, indent=2)
-            print(f"💾 Sauvegardé dans {JSON_FILE}")
-        except Exception as e:
-            print(f"❌ Erreur de sauvegarde: {e}")
+        # Sauvegarder les données
+        if not sauvegarder_pharmacies(pharmacies):
             return jsonify({
                 "success": False,
-                "error": f"Erreur de sauvegarde: {str(e)}"
+                "error": "Erreur lors de la sauvegarde"
             }), 500
         
-        # 4. Notifier WordPress automatiquement
-        print("📤 Notification de WordPress...")
-        notification_success = notifier_wordpress(len(data))
+        # Notifier WordPress (non bloquant)
+        wordpress_notified = notifier_wordpress()
         
-        # 5. Réponse
-        return jsonify({
+        response = {
             "success": True,
             "message": "Pharmacies sauvegardées avec succès",
-            "data": {
-                "count": len(data),
-                "timestamp": pharmacies_data["last_update"],
-                "wordpress_notified": notification_success
-            }
-        }), 200
+            "count": len(pharmacies),
+            "timestamp": datetime.now().isoformat(),
+            "wordpress_notified": wordpress_notified
+        }
+        
+        log_message(f"✅ Opération terminée - WordPress notifié: {wordpress_notified}")
+        
+        return jsonify(response), 200
         
     except Exception as e:
-        print(f"❌ Erreur: {e}")
+        log_message(f"❌ Erreur dans save_pharmacies: {e}")
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
-
 @app.route('/api/pharmacies', methods=['GET'])
 def get_pharmacies():
     """
-    Retourne les pharmacies stockées
+    Endpoint GET pour récupérer les pharmacies sauvegardées
     Utilisé par WordPress pour récupérer les données
     """
     try:
-        # Vérifier si le fichier existe
-        if not os.path.exists(JSON_FILE):
+        log_message("📤 Demande de récupération des pharmacies")
+        
+        data = charger_pharmacies()
+        
+        if not data.get("pharmacies"):
+            log_message("⚠️ Aucune pharmacie disponible")
             return jsonify({
-                "success": False,
-                "error": "Aucune donnée disponible",
+                "success": True,
                 "pharmacies": [],
-                "count": 0
-            }), 404
+                "count": 0,
+                "last_update": None,
+                "message": "Aucune pharmacie disponible"
+            }), 200
         
-        # Lire le fichier
-        with open(JSON_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        print(f"📤 Envoi de {data.get('count', 0)} pharmacies")
-        
-        return jsonify({
+        response = {
             "success": True,
-            "pharmacies": data.get("pharmacies", []),
+            "pharmacies": data["pharmacies"],
+            "count": data.get("count", len(data["pharmacies"])),
             "last_update": data.get("last_update"),
-            "count": data.get("count", 0)
-        }), 200
-        
-    except json.JSONDecodeError:
-        return jsonify({
-            "success": False,
-            "error": "Fichier JSON corrompu",
-            "pharmacies": [],
-            "count": 0
-        }), 500
-        
-    except Exception as e:
-        print(f"❌ Erreur: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "pharmacies": [],
-            "count": 0
-        }), 500
-
-
-def notifier_wordpress(pharmacies_count):
-    """
-    Envoie une notification à WordPress
-    WordPress va ensuite récupérer les données via GET /api/pharmacies
-    """
-    try:
-        print(f"🔔 Notification WordPress: {WORDPRESS_WEBHOOK}")
-        
-        payload = {
-            "message": "Nouvelles pharmacies disponibles",
-            "count": pharmacies_count,
             "timestamp": datetime.now().isoformat()
         }
         
-        response = requests.post(
-            WORDPRESS_WEBHOOK,
-            json=payload,
-            timeout=30
-        )
+        log_message(f"✅ {response['count']} pharmacies envoyées")
         
-        if response.status_code == 200:
-            print("✅ WordPress notifié avec succès")
-            return True
-        else:
-            print(f"⚠️ WordPress a répondu avec le code {response.status_code}")
-            print(f"Réponse: {response.text[:200]}")
-            return False
-            
-    except requests.exceptions.Timeout:
-        print("⏰ Timeout lors de la notification WordPress")
-        return False
-        
-    except requests.exceptions.ConnectionError:
-        print("🌐 Erreur de connexion à WordPress")
-        return False
+        return jsonify(response), 200
         
     except Exception as e:
-        print(f"❌ Erreur lors de la notification WordPress: {e}")
-        return False
+        log_message(f"❌ Erreur dans get_pharmacies: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
-
-# ====================
-# ENDPOINTS DE DEBUG
-# ====================
-
-@app.route('/status', methods=['GET'])
-def status():
-    """Vérifie l'état du système"""
-    file_exists = os.path.exists(JSON_FILE)
-    
-    status_info = {
-        "status": "running",
-        "json_file_exists": file_exists,
-        "json_file_path": os.path.abspath(JSON_FILE) if file_exists else None,
-        "wordpress_webhook": WORDPRESS_WEBHOOK,
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    if file_exists:
-        try:
-            with open(JSON_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            status_info["pharmacies_count"] = data.get("count", 0)
-            status_info["last_update"] = data.get("last_update")
-        except:
-            status_info["json_file_error"] = "Impossible de lire le fichier"
-    
-    return jsonify(status_info), 200
-
-
-@app.route('/test-wordpress', methods=['GET'])
-def test_wordpress():
-    """Teste la connexion à WordPress"""
-    success = notifier_wordpress(0)
-    
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Endpoint de santé pour Render"""
     return jsonify({
-        "wordpress_webhook": WORDPRESS_WEBHOOK,
-        "notification_sent": success,
-        "message": "Notification de test envoyée" if success else "Échec de la notification"
-    }), 200 if success else 500
-
-
-# ====================
-# LANCEMENT
-# ====================
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    print(f"🚀 Démarrage de l'API sur le port {port}")
-    print(f"📁 Fichier de données: {JSON_FILE}")
-    print(f"🔗 Webhook WordPress: {WORDPRESS_WEBHOOK}")
+    port = int(os.environ.get('PORT', 10000))
+    log_message(f"🚀 Démarrage de l'API sur le port {port}")
+    log_message(f"🔗 WordPress Webhook: {WORDPRESS_WEBHOOK_URL}")
     app.run(host='0.0.0.0', port=port, debug=False)
-
