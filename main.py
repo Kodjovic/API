@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # 🔧 Configuration
 JSON_FILE = "pharmacies.json"
-WORDPRESS_WEBHOOK = os.getenv('WORDPRESS_WEBHOOK', 'https://votre-site.com/wp-json/custom/v1/notify-update')
+WORDPRESS_WEBHOOK = os.getenv('WORDPRESS_WEBHOOK', 'https://mapharmadegarde.com/wp-json/custom/v1/notify-update')
 
 # ====================
 # ENDPOINTS
@@ -242,3 +242,4 @@ if __name__ == '__main__':
     print(f"📁 Fichier de données: {JSON_FILE}")
     print(f"🔗 Webhook WordPress: {WORDPRESS_WEBHOOK}")
     app.run(host='0.0.0.0', port=port, debug=False)
+
